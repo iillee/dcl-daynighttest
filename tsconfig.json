@@ -1,0 +1,7 @@
+{
+	"extends": "@dcl/sdk/types/tsconfig.ecs7.json",
+	"include": ["src"],
+	"compilerOptions": {
+		"outDir": "bin"
+	}
+}

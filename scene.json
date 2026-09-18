@@ -1,0 +1,20 @@
+{
+  "ecs7": true,
+  "runtimeVersion": "7",
+  "display": {
+    "title": "SkyboxTime Worlds Repro",
+    "description": "Minimal repro: SkyboxTime.fixedTime is ignored on Worlds."
+  },
+  "scene": {
+    "parcels": [
+      "0,0"
+    ],
+    "base": "0,0"
+  },
+  "main": "bin/index.js",
+  "skyboxConfig": {},
+  "worldConfiguration": {
+    "name": "baskervill.dcl.eth"
+  },
+  "authoritativeMultiplayer": true
+}
