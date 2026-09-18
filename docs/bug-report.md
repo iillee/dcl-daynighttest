@@ -1,83 +1,102 @@
-# SkyboxTime.fixedTime is ignored on Decentraland Worlds
+# SkyboxTime is ignored on Decentraland Worlds
 
-**Reported by:** Snow Drift team (snowdrift.dcl.eth)
 **Status:** open, reproducible
-**Severity:** blocks any scene that needs a dynamic time-of-day
+**Severity:** blocks any scene needing a runtime-controlled sky on Worlds
 **Environment:**
 
 | Field | Value |
 |---|---|
 | SDK | `@dcl/sdk@7.26.1-32860802198.commit-dae48fb` (pinned exact) |
-| Deploy target | Decentraland World (`snowdrift.dcl.eth`) |
+| Deploy target | Decentraland World (`baskervill.dcl.eth`) |
 | Content server | `https://worlds-content-server.decentraland.org` |
 | Local preview | Creator Hub bundled preview |
-| Reproduced on | 2026-09-17 |
-| Working branch | `daynight-cycle` in this repo |
+| Reproduced on | 2026-09-18 |
+| Repro repo | https://github.com/iillee/dcl-daynighttest |
 
 ---
 
 ## Summary
 
-Writing the `SkyboxTime` component to `engine.RootEntity` has **no effect** on the rendered sky or on `getWorldTime()` when the scene is deployed to a World. The component is *accepted* — its presence correctly defeats the player time-of-day UI slider — but the `fixedTime` value it carries is completely ignored by the Worlds runtime.
+On Decentraland **Worlds**, the `SkyboxTime` component on `engine.RootEntity` is silently non-functional in two distinct ways. The **identical code** works correctly in local Creator Hub preview.
 
-The **same code** works exactly as documented in local Creator Hub preview.
+1. **Bug A — `fixedTime` value is discarded.** Every `SkyboxTime.createOrReplace(...)` call is accepted at the ECS level (`SkyboxTime.has(RootEntity)` returns `true`), but the World runtime clock and the visible sky both ignore the value entirely and continue to run on DCL's default ~2 h per 24 h skybox cycle.
+2. **Bug B — presence does not defeat the client-side NIGHT/DAY UI.** Per SDK docs and preview behaviour, the mere presence of `SkyboxTime` on RootEntity should disable the player's client-side day/night slider. On Worlds the panel remains fully interactive in both **Auto** and **Manual** modes.
 
-`scene.json > skyboxConfig.fixedTime` (the static, deploy-time equivalent) DOES work on Worlds, but is not dynamic — it locks the sky to a single baked value with no runtime control.
-
-Net effect: on Worlds today it is impossible to implement a dynamic day/night cycle, seasonal skybox drift, solstice events, or any other runtime-driven sky change through the documented SDK7 API.
+Net effect: on Worlds today it is impossible to implement a runtime day/night cycle, seasonal drift, solstice event, or any other scene-controlled sky effect through the documented `SkyboxTime` API. `scene.json > skyboxConfig.fixedTime` (the static, deploy-time equivalent) still works but is not runtime-controllable.
 
 ---
 
 ## Reproduction
 
-Minimal repro (paste into any SDK7 scene's `src/index.ts`):
+Full repro scene: https://github.com/iillee/dcl-daynighttest
+
+Minimal code (`src/index.ts`, cycle mode):
 
 ```ts
-import { engine, SkyboxTime, TransitionMode } from '@dcl/sdk/ecs'
-import { getWorldTime }                       from '~system/Runtime'
-import { executeTask }                        from '@dcl/sdk/ecs'
+import { engine, SkyboxTime, TransitionMode, executeTask } from '@dcl/sdk/ecs'
+import { getWorldTime } from '~system/Runtime'
+
+const CYCLE_REAL_SECONDS = 60  // one 24 h sweep every real minute
 
 export function main() {
-  // Write once, at scene start, to a distinctive value (06:00 dawn).
-  SkyboxTime.createOrReplace(engine.RootEntity, {
-    fixedTime     : 21600,
-    transitionMode: TransitionMode.TM_FORWARD,
-  })
+	// Drive a continuous 24 h sweep, writing at 10 Hz.
+	let prev = 0
+	engine.addSystem(() => {
+		const cycleMs = CYCLE_REAL_SECONDS * 1000
+		const anchor  = Date.UTC(2026, 0, 1)
+		const phase   = (((Date.now() - anchor) % cycleMs) + cycleMs) % cycleMs / cycleMs
+		const t       = phase * 86400
 
-  // Log what the runtime says every second.
-  let acc = 0
-  engine.addSystem((dt: number) => {
-    acc += dt
-    if (acc < 1) return
-    acc = 0
-    executeTask(async () => {
-      const t = await getWorldTime({})
-      console.log(
-        `RUNTIME=${t.seconds.toFixed(1)} ` +
-        `LOCKED=${SkyboxTime.has(engine.RootEntity)} ` +
-        `WRITTEN=21600`
-      )
-    })
-  })
+		// Shortest modular path so the midnight wrap doesn't race forward.
+		const fwd = ((t - prev) % 86400 + 86400) % 86400
+		const mode = fwd <= 86400 - fwd ? TransitionMode.TM_FORWARD : TransitionMode.TM_BACKWARD
+
+		SkyboxTime.createOrReplace(engine.RootEntity, { fixedTime: t, transitionMode: mode })
+		prev = t
+	})
+
+	// Log runtime state every second for observability.
+	let acc = 0
+	engine.addSystem((dt: number) => {
+		acc += dt; if (acc < 1) return; acc = 0
+		executeTask(async () => {
+			const rt = await getWorldTime({})
+			console.log(`RUNTIME=${rt.seconds.toFixed(1)} LOCKED=${SkyboxTime.has(engine.RootEntity)}`)
+		})
+	})
 }
 ```
 
-Ensure `scene.json` does NOT contain a `skyboxConfig.fixedTime` (leave it as `"skyboxConfig": {}` or omit).
+Ensure `scene.json > skyboxConfig` is empty (`"skyboxConfig": {}`) so the component is the only mechanism under test.
 
 ### Local preview (Creator Hub)
 
-- Sky visibly shows dawn (06:00 sun position and colours).
-- Log line each second: `RUNTIME=21600.0 LOCKED=true WRITTEN=21600`
-- Player UI time-of-day slider is disabled (correct).
+- Sun visibly sweeps a full 24 h cycle every real minute. ✅
+- Client-side NIGHT/DAY panel is disabled (grayed out). ✅
+- `RUNTIME` value tracks `WRITTEN` with a small (~seconds) engine-interp lag. ✅
 
-### Worlds deploy (`snowdrift.dcl.eth`)
+### Worlds deploy (`baskervill.dcl.eth`)
 
-- Sky visibly renders as **daytime blue** \u2014 not dawn.
-- Log line each second: `RUNTIME=` some value entirely unrelated to 21600, drifting slowly at DCL default 2 h cycle rate.
-- `LOCKED=true` (component IS present on RootEntity).
-- Player UI time-of-day slider IS disabled (component-presence lock still works).
+- Sun does **not** move — it renders whatever the client-side NIGHT/DAY panel is showing. ❌
+- Client-side NIGHT/DAY panel is **fully interactive** in both Auto and Manual mode. ❌
+- Console shows `LOCKED=true` (component present) and `WRITES/s ≈ 10`, but `RUNTIME` drifts on DCL's default 2 h cycle rate, completely unrelated to `WRITTEN`. ❌
+- In Auto mode, moving the client slider temporarily changes the sky, then it snaps back to the runtime clock value — so our 10 Hz writes are being rendered momentarily on Worlds too, but immediately overridden. Visible as flicker on the client UI.
 
-The component is received. `fixedTime` is silently discarded.
+---
+
+## Evidence
+
+`assets/images/screenshot01.png` — Worlds, ~10 minutes after scene load:
+
+- HUD: `WRITTEN=14:26:29`, `RUNTIME=09:58:36`, `LOCKED=yes`, `WRITES/s=9.69`, `TOTAL W=781`.
+- Client NIGHT/DAY panel: **openable and interactive**, `Auto=OFF`, `Custom=09:58` (matches RUNTIME, not WRITTEN).
+- Sun visibly at ~10 AM position (matches RUNTIME).
+
+`assets/images/screenshot02.png` — Worlds, ~10 minutes later:
+
+- HUD: `WRITTEN=20:59:34`, `RUNTIME=12:10:26`, `LOCKED=yes`, `WRITES/s=9.64`, `TOTAL W=3082`.
+- Client NIGHT/DAY panel: **still openable and interactive**, `Auto=ON`.
+- `RUNTIME` advanced 09:58 → 12:10 across ~10 real minutes = ~2 h skybox per 10 min real = DCL default 2 h per 24 h cycle. Confirms the World runtime is running its own default clock and completely ignoring the scene's writes.
 
 ---
 
@@ -85,49 +104,50 @@ The component is received. `fixedTime` is silently discarded.
 
 We also tested:
 
-1. **Continuous 10 Hz writes** with directional `transitionMode` and modular shortest-path selection. Same result on Worlds: `LOCKED=true`, `RUNTIME` continues drifting at default 2 h cycle rate ignoring every write. In preview the same code drives a clean full 24 h skybox sweep in 8 min.
-2. **`scene.json > skyboxConfig.fixedTime` alone**. Works on both preview and Worlds. Sky locks to the JSON value, player UI defeated, `SkyboxTime.has(RootEntity)` is `false` (the JSON path does not surface as a component).
-3. **JSON `fixedTime` present AND component writes at 10 Hz**. On preview the component wins (documented behaviour). On Worlds the JSON wins and component writes are ignored.
+1. **Single write at scene start** (`SkyboxTime.createOrReplace` once, no tick loop) — value ignored on Worlds and in preview.
+2. **Continuous 10 Hz writes of a constant `fixedTime`** — same result on Worlds (ignored) as continuous cycling writes.
+3. **`scene.json > skyboxConfig.fixedTime` alone (no component)** — works on both preview and Worlds. Sky locks to the JSON value, client UI defeated, `SkyboxTime.has(RootEntity) === false`.
+4. **JSON `fixedTime` present AND component writes at 10 Hz** — on preview the component wins (documented). On Worlds the JSON wins and component writes are ignored.
 
-So the failure is specifically the `SkyboxTime` component's `fixedTime` field being non-functional in the Worlds runtime.
+So the failure is specifically the runtime `SkyboxTime` component being non-functional in the Worlds runtime. The static JSON path still works.
 
 ---
 
 ## Impact
 
-For Snow Drift specifically, this blocks:
+Blocks any Worlds scene that wants:
 
-- Any runtime day/night cycle at a cadence different from DCL default (2 h real per skybox day).
-- Independently tunable day / night durations (design goal 2 of the phase-clock work).
-- Seasonal skybox drift (autumn -> winter solstice -> spring lighting shifts).
-- Solstice event (planned climax with a locked deep-night sky and dramatic post-event dawn).
+- A runtime day/night cycle at a cadence different from DCL's default 2 h.
+- Independently tunable day / night durations.
+- Seasonal skybox drift (e.g. autumn → winter solstice → spring lighting).
+- Story-pacing sky changes (dawn as game climax, forced night for a puzzle, etc.).
+- Sky reactivity to gameplay events.
 
-More broadly, any scene that uses `SkyboxTime` for atmosphere, story pacing, or gameplay-tied lighting is silently broken when deployed to Worlds. The failure is silent because the component write reports success and `LOCKED` reads true; the divergence only shows up in `getWorldTime()` and the visible sky.
+More broadly, any scene that uses `SkyboxTime` for atmosphere or gameplay lighting is silently broken when deployed to Worlds. The failure is silent because the component write reports success, `LOCKED` reads true, and there is no error surface anywhere.
 
 ---
 
-## Empirical characterisation (bonus)
+## Empirical characterisations (bonus)
 
-While isolating this bug we also characterised behaviours the SDK docs do not spell out. Sharing here in case any are actual bugs vs. intentional-but-undocumented:
+While isolating this bug we also noted the following, in case any are actual bugs vs. intentional-but-undocumented behaviour:
 
-1. **Per-frame `SkyboxTime.createOrReplace(...)` calls** perpetually reset the engine's smooth-transition interpolator; DELTA between requested and rendered time can climb to \u00b117 h before the interpolator catches up. Recommendation to document: batch writes and only apply on `fixedTime` changes above a threshold.
-2. **`transitionMode` default `TM_FORWARD`** interprets any decrease in `fixedTime` as "advance forward N hours" and races through the whole clock. Callers must set `TM_BACKWARD` when writing a smaller value than the current, and pick shortest-modular-path around the midnight seam. Would benefit from a `TM_AUTO_SHORTEST` mode or auto-detection.
-3. **`SkyboxTime.has(RootEntity)` is NOT true when the sky is locked via `scene.json > skyboxConfig.fixedTime`.** The two lock mechanisms are not equivalent in observability. Consider surfacing the JSON lock as a phantom component so scene code can uniformly ask "is the sky currently locked?".
-4. **The "smooth transition over a few seconds" duration is undocumented.** We measured jumpy shadow motion at 500 ms write cadence and clean motion at 100 ms; celestial body direction appears to be a discrete function of the last-written `fixedTime` with no engine-side interpolation between writes.
+1. **`transitionMode` default `TM_FORWARD` interprets any decrease in `fixedTime` as "advance forward N hours"** and races through the whole clock. Callers must set `TM_BACKWARD` when writing a smaller value than the current, and pick shortest-modular-path around the midnight seam. A `TM_AUTO_SHORTEST` mode or auto-detection would remove a common footgun.
+2. **`SkyboxTime.has(RootEntity)` is `false` when the sky is locked via `scene.json > skyboxConfig.fixedTime`.** The two lock mechanisms are not equivalent in observability. Consider surfacing the JSON lock as a phantom component so scene code can uniformly ask "is the sky currently locked?".
+3. **`getWorldTime()` has a smooth-transition lag of several seconds** behind the last-written `fixedTime` value in preview. `getWorldTime()` is not a reliable readback for "what fixedTime is currently applied" — the visible sky is the source of truth. Documenting this expected lag would prevent future scenes from misusing it as a diagnostic.
+4. **On Worlds, momentary sky flicker during our 10 Hz writes** suggests writes ARE reaching the renderer briefly before being overridden by the World runtime clock. Whatever component is winning the "who owns the sky?" arbitration on Worlds does not exist in preview.
 
 ---
 
 ## What we'd like
 
-1. Confirmation that this is a Worlds runtime bug and a target fix version.
-2. Guidance on any workaround short of Foundation-side fix. We currently plan to fall back to a static `scene.json` fixedTime and defer the whole day/night phase-clock milestone.
-3. Long-shot: any preview of upcoming custom-skybox APIs (cubemap texture upload, tint control, sun/moon direction override). Design-doc-adjacent to this bug \u2014 the phase clock plans to feed seasonal art variations that a fixed sky can't express even when working.
+1. Confirmation that Bugs A and B are Worlds runtime bugs and a target fix version.
+2. Guidance on any workaround short of a Foundation-side fix. We currently plan to fall back to a static `scene.json > skyboxConfig.fixedTime` and defer any runtime sky work.
+3. Long-shot: any preview of upcoming custom-skybox APIs (cubemap texture upload, tint control, sun/moon direction override).
 
 ---
 
 ## Contact
 
-- Repo: `daynight-cycle` branch, root of Snow Drift project.
-- Owner: Luke (creator of `snowdrift.dcl.eth`).
-- Reproducing files: `src/client/skybox.ts`, `src/client/skyboxDebug.ts`, `src/client/ui/layers/layer.skyboxDebug.tsx`, `src/client/devFlags.ts` (`SHOW_SKYBOX_DEBUG`).
-- To reproduce quickly: on the `daynight-cycle` branch, in `src/client/index.ts` uncomment the `setupSkybox()` and `setupSkyboxDebug()` imports + calls, flip `SHOW_SKYBOX_DEBUG = true` in `devFlags.ts`, deploy to any World, compare the on-screen overlay against local preview.
+- Repro repo: https://github.com/iillee/dcl-daynighttest
+- Live World: https://play.decentraland.org/?NETWORK=mainnet&position=0,0&realm=baskervill.dcl.eth
+- Deploy wallet: `0x1e93e534c5e26b01ed242410b43ae23dd0faa52b`
