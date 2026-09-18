@@ -104,10 +104,10 @@ Ensure `scene.json > skyboxConfig` is empty (`"skyboxConfig": {}`) so the compon
 
 We also tested:
 
-1. **Single write at scene start** (`SkyboxTime.createOrReplace` once, no tick loop) — value ignored on Worlds and in preview.
+1. **Single write at scene start** (`SkyboxTime.createOrReplace` once, no tick loop) — value ignored on Worlds. `SkyboxTime.has(RootEntity)` still returns `true`, client UI stays interactive, sky does not lock. See `assets/images/screenshot03.png`.
 2. **Continuous 10 Hz writes of a constant `fixedTime`** — same result on Worlds (ignored) as continuous cycling writes.
-3. **`scene.json > skyboxConfig.fixedTime` alone (no component)** — works on both preview and Worlds. Sky locks to the JSON value, client UI defeated, `SkyboxTime.has(RootEntity) === false`.
-4. **JSON `fixedTime` present AND component writes at 10 Hz** — on preview the component wins (documented). On Worlds the JSON wins and component writes are ignored.
+3. **`scene.json > skyboxConfig.fixedTime` alone (no component)** — works on both preview and Worlds. Sky locks to the JSON value, client UI defeated.
+4. **JSON `fixedTime` present AND component writes at 10 Hz — the definitive test.** We deployed with `scene.json > skyboxConfig.fixedTime = 0` (midnight) and simultaneously wrote `SkyboxTime.createOrReplace(fixedTime: 21600)` (06:00 dawn) once at scene load. If the component were doing anything on Worlds, the sky would render dawn. Instead, sky renders **midnight** and the client UI is locked to `00:00`. `SkyboxTime.has(RootEntity)` still returns `true`. See `assets/images/screenshot04.png`. **The JSON value overrides the component value in a way that proves the component's `fixedTime` is being fully discarded, not merged.**
 
 So the failure is specifically the runtime `SkyboxTime` component being non-functional in the Worlds runtime. The static JSON path still works.
 
